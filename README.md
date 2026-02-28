@@ -36,7 +36,7 @@ brew tap dmoliveira/tap
 brew install opencode-tmux-mem
 ```
 
-Formula is published in `dmoliveira/tap` and built from `v0.1.0`.
+Formula is published in `dmoliveira/tap` and tracks the latest tagged release.
 
 ## Usage
 
