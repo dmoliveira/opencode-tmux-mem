@@ -36,7 +36,7 @@ brew tap dmoliveira/tap
 brew install opencode-tmux-mem
 ```
 
-If the formula is not published yet, see `docs/homebrew.md` for the release steps.
+Formula is published in `dmoliveira/tap` and built from `v0.1.0`.
 
 ## Usage
 
