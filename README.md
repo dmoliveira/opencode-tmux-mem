@@ -55,6 +55,9 @@ opencode-tmux-mem --match-mode exact
 # Match full command lines (e.g. opencode --continue)
 opencode-tmux-mem --match-mode full --process opencode
 
+# Aggregate by tmux pane to see memory concentration
+opencode-tmux-mem --view pane
+
 # Export as JSON/CSV/YAML/Markdown
 opencode-tmux-mem --export report.json
 opencode-tmux-mem --format markdown --export report.md
@@ -71,6 +74,8 @@ opencode-tmux-mem --no-history-bytes
 - `Physical`: physical footprint
 - `RSS`: resident memory from `ps`
 - `PaneHistory`: captured history text bytes (lower-bound estimate)
+
+Use `--view pane` to group all matching processes under each tmux pane and see pane-level totals.
 
 ## Testing ✅
 
