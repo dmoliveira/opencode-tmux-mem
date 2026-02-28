@@ -49,10 +49,31 @@ enum MatchMode {
 struct Cli {
     process_pattern: String,
     match_mode: MatchMode,
+    view_mode: ViewMode,
     stdout_format: OutputFormat,
     export_path: Option<String>,
     export_format: Option<OutputFormat>,
     no_history_bytes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Process,
+    Pane,
+}
+
+#[derive(Debug, Clone)]
+struct PaneRecord {
+    tmux_target: String,
+    tmux_window_name: String,
+    process_count: usize,
+    pids: Vec<i32>,
+    swap_bytes: u64,
+    physical_bytes: u64,
+    rss_bytes: u64,
+    pane_history_size: i64,
+    pane_history_limit: i64,
+    pane_history_bytes: u64,
 }
 
 fn main() {
@@ -141,7 +162,12 @@ fn run() -> Result<(), String> {
             .then_with(|| a.pid.cmp(&b.pid))
     });
 
-    let output = render(&rows, cli.stdout_format);
+    let panes = aggregate_by_pane(&rows);
+
+    let output = match cli.view_mode {
+        ViewMode::Process => render_process(&rows, cli.stdout_format),
+        ViewMode::Pane => render_pane(&panes, cli.stdout_format),
+    };
     print!("{output}");
 
     if let Some(path) = cli.export_path {
@@ -149,9 +175,16 @@ fn run() -> Result<(), String> {
             .export_format
             .or_else(|| infer_format_from_path(&path))
             .unwrap_or(OutputFormat::Json);
-        let body = render(&rows, fmt);
+        let body = match cli.view_mode {
+            ViewMode::Process => render_process(&rows, fmt),
+            ViewMode::Pane => render_pane(&panes, fmt),
+        };
         fs::write(&path, body).map_err(|e| format!("failed writing export file '{path}': {e}"))?;
-        eprintln!("exported {} records to {}", rows.len(), path);
+        let count = match cli.view_mode {
+            ViewMode::Process => rows.len(),
+            ViewMode::Pane => panes.len(),
+        };
+        eprintln!("exported {} records to {}", count, path);
     }
 
     Ok(())
@@ -161,6 +194,7 @@ fn parse_cli() -> Result<Cli, String> {
     // Intentionally no external CLI crate: tiny binary, tiny dependency surface.
     let mut process_pattern = "opencode".to_string();
     let mut match_mode = MatchMode::Exact;
+    let mut view_mode = ViewMode::Process;
     let mut stdout_format = OutputFormat::Table;
     let mut export_path: Option<String> = None;
     let mut export_format: Option<OutputFormat> = None;
@@ -189,6 +223,11 @@ fn parse_cli() -> Result<Cli, String> {
                 let v = args.get(i).ok_or("--format requires a value")?;
                 stdout_format = parse_format(v)?;
             }
+            "--view" => {
+                i += 1;
+                let v = args.get(i).ok_or("--view requires a value")?;
+                view_mode = parse_view_mode(v)?;
+            }
             "--export" => {
                 i += 1;
                 export_path = Some(
@@ -215,6 +254,7 @@ fn parse_cli() -> Result<Cli, String> {
     Ok(Cli {
         process_pattern,
         match_mode,
+        view_mode,
         stdout_format,
         export_path,
         export_format,
@@ -231,6 +271,7 @@ fn print_help() {
     println!("Options:");
     println!("  --process <pattern>         Process pattern (default: opencode)");
     println!("  --match-mode <exact|full>   PID scan mode (default: exact)");
+    println!("  --view <process|pane>       Output view mode (default: process)");
     println!("  --format <fmt>              table|json|csv|yaml|markdown (default: table)");
     println!("  --export <path>             Export to file");
     println!("  --export-format <fmt>       Export format override");
@@ -246,6 +287,14 @@ fn parse_format(v: &str) -> Result<OutputFormat, String> {
         "yaml" | "yml" => Ok(OutputFormat::Yaml),
         "markdown" | "md" => Ok(OutputFormat::Markdown),
         _ => Err(format!("unsupported format: {v}")),
+    }
+}
+
+fn parse_view_mode(v: &str) -> Result<ViewMode, String> {
+    match v.to_ascii_lowercase().as_str() {
+        "process" => Ok(ViewMode::Process),
+        "pane" => Ok(ViewMode::Pane),
+        _ => Err(format!("unsupported view mode: {v}")),
     }
 }
 
@@ -461,7 +510,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn render(rows: &[ProcRecord], fmt: OutputFormat) -> String {
+fn render_process(rows: &[ProcRecord], fmt: OutputFormat) -> String {
     match fmt {
         OutputFormat::Table => render_table(rows),
         OutputFormat::Json => render_json(rows),
@@ -469,6 +518,62 @@ fn render(rows: &[ProcRecord], fmt: OutputFormat) -> String {
         OutputFormat::Yaml => render_yaml(rows),
         OutputFormat::Markdown => render_markdown(rows),
     }
+}
+
+fn render_pane(rows: &[PaneRecord], fmt: OutputFormat) -> String {
+    match fmt {
+        OutputFormat::Table => render_pane_table(rows),
+        OutputFormat::Json => render_pane_json(rows),
+        OutputFormat::Csv => render_pane_csv(rows),
+        OutputFormat::Yaml => render_pane_yaml(rows),
+        OutputFormat::Markdown => render_pane_markdown(rows),
+    }
+}
+
+fn aggregate_by_pane(rows: &[ProcRecord]) -> Vec<PaneRecord> {
+    let mut by_pane = HashMap::<String, PaneRecord>::new();
+    for row in rows {
+        let entry = by_pane
+            .entry(row.tmux_target.clone())
+            .or_insert_with(|| PaneRecord {
+                tmux_target: row.tmux_target.clone(),
+                tmux_window_name: row.tmux_window_name.clone(),
+                process_count: 0,
+                pids: Vec::new(),
+                swap_bytes: 0,
+                physical_bytes: 0,
+                rss_bytes: 0,
+                pane_history_size: row.pane_history_size,
+                pane_history_limit: row.pane_history_limit,
+                pane_history_bytes: row.pane_history_bytes,
+            });
+
+        entry.process_count += 1;
+        entry.pids.push(row.pid);
+        entry.swap_bytes = entry.swap_bytes.saturating_add(row.swap_bytes);
+        entry.physical_bytes = entry.physical_bytes.saturating_add(row.physical_bytes);
+        entry.rss_bytes = entry.rss_bytes.saturating_add(row.rss_bytes);
+
+        // Keep the richest pane history metadata and avoid double-counting bytes.
+        if row.pane_history_size > entry.pane_history_size {
+            entry.pane_history_size = row.pane_history_size;
+        }
+        if row.pane_history_limit > entry.pane_history_limit {
+            entry.pane_history_limit = row.pane_history_limit;
+        }
+        if row.pane_history_bytes > entry.pane_history_bytes {
+            entry.pane_history_bytes = row.pane_history_bytes;
+        }
+    }
+
+    let mut pane_rows = by_pane.into_values().collect::<Vec<_>>();
+    pane_rows.sort_by(|a, b| {
+        b.swap_bytes
+            .cmp(&a.swap_bytes)
+            .then_with(|| b.physical_bytes.cmp(&a.physical_bytes))
+            .then_with(|| a.tmux_target.cmp(&b.tmux_target))
+    });
+    pane_rows
 }
 
 fn render_table(rows: &[ProcRecord]) -> String {
@@ -667,6 +772,197 @@ fn render_markdown(rows: &[ProcRecord]) -> String {
     out
 }
 
+fn render_pane_table(rows: &[PaneRecord]) -> String {
+    let mut out = String::new();
+    out.push_str("Tmux window.pane\tWindow\tProcesses\tPIDs\tSwap\tPhysical\tRSS\tPaneHistory\tHistory lines\n");
+    for row in rows {
+        let history_lines = if row.pane_history_size >= 0 {
+            format!("{}/{}", row.pane_history_size, row.pane_history_limit)
+        } else {
+            "-".to_string()
+        };
+        let pids = row
+            .pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.tmux_target,
+            row.tmux_window_name,
+            row.process_count,
+            pids,
+            human_bytes(row.swap_bytes),
+            human_bytes(row.physical_bytes),
+            human_bytes(row.rss_bytes),
+            human_bytes(row.pane_history_bytes),
+            history_lines,
+        );
+    }
+
+    let total_swap = rows.iter().map(|r| r.swap_bytes).sum::<u64>();
+    let total_phys = rows.iter().map(|r| r.physical_bytes).sum::<u64>();
+    let total_rss = rows.iter().map(|r| r.rss_bytes).sum::<u64>();
+    let total_hist = rows.iter().map(|r| r.pane_history_bytes).sum::<u64>();
+
+    out.push('\n');
+    let _ = writeln!(out, "Total swap:\t{}", human_bytes(total_swap));
+    let _ = writeln!(out, "Total physical:\t{}", human_bytes(total_phys));
+    let _ = writeln!(out, "Total RSS:\t{}", human_bytes(total_rss));
+    let _ = writeln!(
+        out,
+        "Total pane history bytes:\t{}",
+        human_bytes(total_hist)
+    );
+    out
+}
+
+fn render_pane_json(rows: &[PaneRecord]) -> String {
+    let mut out = String::new();
+    out.push_str("[\n");
+    for (idx, row) in rows.iter().enumerate() {
+        let comma = if idx + 1 == rows.len() { "" } else { "," };
+        let history_lines = if row.pane_history_size >= 0 {
+            format!("\"{}/{}\"", row.pane_history_size, row.pane_history_limit)
+        } else {
+            "null".to_string()
+        };
+        let pids = row
+            .pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            out,
+            "  {{\"tmux_target\":\"{}\",\"tmux_window\":\"{}\",\"process_count\":{},\"pids\":[{}],\"swap_bytes\":{},\"swap_human\":\"{}\",\"physical_bytes\":{},\"physical_human\":\"{}\",\"rss_bytes\":{},\"rss_human\":\"{}\",\"pane_history_bytes\":{},\"pane_history_human\":\"{}\",\"pane_history_lines\":{}}}{}",
+            escape_json(&row.tmux_target),
+            escape_json(&row.tmux_window_name),
+            row.process_count,
+            pids,
+            row.swap_bytes,
+            escape_json(&human_bytes(row.swap_bytes)),
+            row.physical_bytes,
+            escape_json(&human_bytes(row.physical_bytes)),
+            row.rss_bytes,
+            escape_json(&human_bytes(row.rss_bytes)),
+            row.pane_history_bytes,
+            escape_json(&human_bytes(row.pane_history_bytes)),
+            history_lines,
+            comma,
+        );
+    }
+    out.push_str("]\n");
+    out
+}
+
+fn render_pane_csv(rows: &[PaneRecord]) -> String {
+    let mut out = String::new();
+    out.push_str("tmux_target,tmux_window,process_count,pids,swap_bytes,swap_human,physical_bytes,physical_human,rss_bytes,rss_human,pane_history_bytes,pane_history_human,pane_history_lines\n");
+    for row in rows {
+        let history_lines = if row.pane_history_size >= 0 {
+            format!("{}/{}", row.pane_history_size, row.pane_history_limit)
+        } else {
+            String::new()
+        };
+        let pids = row
+            .pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            escape_csv(&row.tmux_target),
+            escape_csv(&row.tmux_window_name),
+            row.process_count,
+            escape_csv(&pids),
+            row.swap_bytes,
+            escape_csv(&human_bytes(row.swap_bytes)),
+            row.physical_bytes,
+            escape_csv(&human_bytes(row.physical_bytes)),
+            row.rss_bytes,
+            escape_csv(&human_bytes(row.rss_bytes)),
+            row.pane_history_bytes,
+            escape_csv(&human_bytes(row.pane_history_bytes)),
+            escape_csv(&history_lines),
+        );
+    }
+    out
+}
+
+fn render_pane_yaml(rows: &[PaneRecord]) -> String {
+    let mut out = String::new();
+    out.push_str("---\n");
+    for row in rows {
+        let history_lines = if row.pane_history_size >= 0 {
+            format!("\"{}/{}\"", row.pane_history_size, row.pane_history_limit)
+        } else {
+            "null".to_string()
+        };
+        let pids = row
+            .pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "- tmux_target: \"{}\"\n  tmux_window: \"{}\"\n  process_count: {}\n  pids: [{}]\n  swap_bytes: {}\n  swap_human: \"{}\"\n  physical_bytes: {}\n  physical_human: \"{}\"\n  rss_bytes: {}\n  rss_human: \"{}\"\n  pane_history_bytes: {}\n  pane_history_human: \"{}\"\n  pane_history_lines: {}",
+            row.tmux_target.replace('"', "\\\""),
+            row.tmux_window_name.replace('"', "\\\""),
+            row.process_count,
+            pids,
+            row.swap_bytes,
+            human_bytes(row.swap_bytes).replace('"', "\\\""),
+            row.physical_bytes,
+            human_bytes(row.physical_bytes).replace('"', "\\\""),
+            row.rss_bytes,
+            human_bytes(row.rss_bytes).replace('"', "\\\""),
+            row.pane_history_bytes,
+            human_bytes(row.pane_history_bytes).replace('"', "\\\""),
+            history_lines,
+        );
+    }
+    out
+}
+
+fn render_pane_markdown(rows: &[PaneRecord]) -> String {
+    let mut out = String::new();
+    out.push_str("| Tmux window.pane | Window | Processes | PIDs | Swap | Physical | RSS | PaneHistory | History lines |\n");
+    out.push_str("|---|---|---:|---|---:|---:|---:|---:|---:|\n");
+    for row in rows {
+        let history_lines = if row.pane_history_size >= 0 {
+            format!("{}/{}", row.pane_history_size, row.pane_history_limit)
+        } else {
+            "-".to_string()
+        };
+        let pids = row
+            .pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.tmux_target,
+            row.tmux_window_name,
+            row.process_count,
+            pids,
+            human_bytes(row.swap_bytes),
+            human_bytes(row.physical_bytes),
+            human_bytes(row.rss_bytes),
+            human_bytes(row.pane_history_bytes),
+            history_lines,
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,5 +1000,49 @@ mod tests {
     fn csv_escape_quotes_and_commas() {
         let got = escape_csv("a,\"b\"");
         assert_eq!(got, "\"a,\"\"b\"\"\"");
+    }
+
+    #[test]
+    fn parse_view_mode_supports_process_and_pane() {
+        assert_eq!(parse_view_mode("process"), Ok(ViewMode::Process));
+        assert_eq!(parse_view_mode("pane"), Ok(ViewMode::Pane));
+    }
+
+    #[test]
+    fn aggregate_by_pane_sums_process_memory() {
+        let rows = vec![
+            ProcRecord {
+                pid: 1,
+                command: "a".to_string(),
+                swap_bytes: 100,
+                physical_bytes: 200,
+                rss_bytes: 300,
+                tmux_target: "s:1.0".to_string(),
+                tmux_window_name: "w".to_string(),
+                pane_history_size: 10,
+                pane_history_limit: 100,
+                pane_history_bytes: 1000,
+            },
+            ProcRecord {
+                pid: 2,
+                command: "b".to_string(),
+                swap_bytes: 50,
+                physical_bytes: 70,
+                rss_bytes: 90,
+                tmux_target: "s:1.0".to_string(),
+                tmux_window_name: "w".to_string(),
+                pane_history_size: 11,
+                pane_history_limit: 100,
+                pane_history_bytes: 900,
+            },
+        ];
+
+        let panes = aggregate_by_pane(&rows);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].process_count, 2);
+        assert_eq!(panes[0].swap_bytes, 150);
+        assert_eq!(panes[0].physical_bytes, 270);
+        assert_eq!(panes[0].rss_bytes, 390);
+        assert_eq!(panes[0].pane_history_bytes, 1000);
     }
 }
