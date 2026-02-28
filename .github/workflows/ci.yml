@@ -23,3 +23,18 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  release-help-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Smoke test release binary path
+        run: ./target/release/opencode-tmux-mem --help
