@@ -7,16 +7,18 @@ Your public tap is `dmoliveira/homebrew-tap`, exposed as `dmoliveira/tap` in Hom
 ## 1) Create a tagged release in this repo
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
-gh release create v0.1.0 --generate-notes
+VERSION=v0.1.1
+git tag "$VERSION"
+git push origin "$VERSION"
+gh release create "$VERSION" --generate-notes
 ```
 
 ## 2) Compute source tarball SHA256
 
 ```bash
-curl -fsSL "https://github.com/dmoliveira/opencode-tmux-mem/archive/refs/tags/v0.1.0.tar.gz" -o /tmp/opencode-tmux-mem-v0.1.0.tar.gz
-shasum -a 256 /tmp/opencode-tmux-mem-v0.1.0.tar.gz
+VERSION=v0.1.1
+curl -fsSL "https://github.com/dmoliveira/opencode-tmux-mem/archive/refs/tags/${VERSION}.tar.gz" -o "/tmp/opencode-tmux-mem-${VERSION}.tar.gz"
+shasum -a 256 "/tmp/opencode-tmux-mem-${VERSION}.tar.gz"
 ```
 
 ## 3) Update formula in tap repo
@@ -33,9 +35,9 @@ Set:
 ## 4) Validate and publish
 
 ```bash
-brew audit --strict --online Formula/opencode-tmux-mem.rb
-brew install --build-from-source Formula/opencode-tmux-mem.rb
+brew audit --strict --online dmoliveira/tap/opencode-tmux-mem
+brew install --build-from-source dmoliveira/tap/opencode-tmux-mem
 git add Formula/opencode-tmux-mem.rb
-git commit -m "opencode-tmux-mem v0.1.0"
+git commit -m "opencode-tmux-mem ${VERSION}"
 git push
 ```

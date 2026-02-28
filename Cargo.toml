@@ -1,6 +1,6 @@
 [package]
 name = "opencode-tmux-mem"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Inspect OpenCode process memory and map each PID back to tmux window/pane"
 license = "MIT"
